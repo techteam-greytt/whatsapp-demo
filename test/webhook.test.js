@@ -19,13 +19,15 @@ test('verification, signatures, duplicate messages, allowlist and status-only ev
     entry: [{ changes: [{ field: 'messages', value: { metadata: { phone_number_id: '123' },
       messages: [{ id, from, type: 'text', text: { body: 'hello' } }] } }] }] });
   const post = body => fetch(base, { method: 'POST', body, headers: {
+    'content-type': 'application/json',
     'x-hub-signature-256': `sha256=${createHmac('sha256', 'test-secret').update(body).digest('hex')}` } });
   assert.equal((await fetch(base, { method: 'POST', body: makeBody() })).status, 401);
   assert.equal((await post('{')).status, 400);
   assert.equal((await post(makeBody())).status, 200);
   await post(makeBody());
   await post(makeBody('918888888888', 'message-2'));
-  await post(JSON.stringify({ object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value: { statuses: [{ status: 'delivered' }] } }] }] }));
+  const statusBody = JSON.stringify({ object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value: { statuses: [{ status: 'delivered' }] } }] }] });
+  assert.equal((await post(statusBody)).status, 200);
   assert.equal(calls.length, 1);
   assert.equal(JSON.parse(calls[0][1].body).to, '919999999999');
 });
