@@ -1,0 +1,18 @@
+# For a standalone repo, change rootDir to . (or remove it).
+services:
+  - type: web
+    name: greytt-whatsapp-demo
+    runtime: node
+    rootDir: demos/whatsapp-demo
+    buildCommand: node --version
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: AUTO_REPLY
+        value: "false"
