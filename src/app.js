@@ -53,9 +53,12 @@ export function createApp(config, { fetchImpl = fetch, log = console.log } = {})
   // Demo-only deduplication: bounded, in-memory, lost on restart.
   const seen = new Map();
   let pending = 0;
+  const record = (event, details = {}) => log(JSON.stringify({
+    loggedAt: new Date().toISOString(), event, ...details,
+  }));
 
   async function processEvent(event) {
-    log('whatsapp: payload ' + JSON.stringify(event));
+    record('webhook_received', { payload: event });
 
     if (event.object === 'whatsapp_business_account') {
       for (const entry of event.entry || []) {
@@ -64,7 +67,13 @@ export function createApp(config, { fetchImpl = fetch, log = console.log } = {})
           const names = new Map((value.contacts || []).map((c) => [c.wa_id, c.profile?.name ?? null]));
 
           for (const status of value.statuses || []) {
-            log('whatsapp: status ' + JSON.stringify(status));
+            record('message_status', {
+              direction: 'outgoing', businessAccountId: entry.id,
+              businessPhone: value.metadata?.display_phone_number,
+              phoneNumberId: value.metadata?.phone_number_id,
+              to: status.recipient_id, messageId: status.id,
+              status: status.status, details: status,
+            });
           }
 
           for (const message of value.messages || []) {
@@ -72,35 +81,70 @@ export function createApp(config, { fetchImpl = fetch, log = console.log } = {})
 
             const now = Date.now();
             for (const [id, expiry] of seen) if (expiry < now) seen.delete(id);
-            if (seen.has(message.id)) continue;
+            if (seen.has(message.id)) {
+              record('duplicate_message_skipped', { messageId: message.id, from: message.from });
+              continue;
+            }
             seen.set(message.id, now + 86400000);
             if (seen.size > 10000) seen.delete(seen.keys().next().value);
 
             const messageDetails = {
+              direction: 'incoming',
+              businessAccountId: entry.id,
+              to: value.metadata?.display_phone_number,
+              phoneNumberId: value.metadata?.phone_number_id,
               id: message.id,
               from: message.from,
               name: names.get(message.from) ?? null,
               type: message.type,
               timestamp: message.timestamp,
               text: incomingText(message),
+              message,
+              contact: (value.contacts || []).find(c => c.wa_id === message.from) ?? null,
             };
-            log('whatsapp: message ' + JSON.stringify(messageDetails));
+            record('incoming_message', messageDetails);
 
             if (!config.autoReply || !config.allowedRecipients.has(message.from) ||
-                value.metadata?.phone_number_id !== config.phoneNumberId) continue;
+                value.metadata?.phone_number_id !== config.phoneNumberId) {
+              record('auto_reply_skipped', { inReplyTo: message.id,
+                reason: !config.autoReply ? 'disabled' : !config.allowedRecipients.has(message.from)
+                  ? 'recipient_not_allowlisted' : 'phone_number_id_mismatch' });
+              continue;
+            }
 
+            const outgoing = { messaging_product: 'whatsapp', to: message.from,
+              type: 'text', text: { body: replyText(message) } };
+            const outgoingDetails = {
+              direction: 'outgoing', from: value.metadata?.display_phone_number,
+              phoneNumberId: config.phoneNumberId, to: message.from,
+              recipientName: names.get(message.from) ?? null,
+              inReplyTo: message.id, message: outgoing,
+            };
+            record('outgoing_message_attempt', outgoingDetails);
+
+            try {
             const response = await fetchImpl(
               `https://graph.facebook.com/${config.apiVersion}/${config.phoneNumberId}/messages`,
               {
                 method: 'POST',
                 headers: { Authorization: `Bearer ${config.accessToken}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ messaging_product: 'whatsapp', to: message.from,
-                  type: 'text', text: { body: replyText(message) } }),
+                body: JSON.stringify(outgoing),
                 signal: AbortSignal.timeout(10000),
               },
             );
-            if (!response.ok) log(JSON.stringify({ event: 'reply_failed', httpStatus: response.status }));
-            else log(JSON.stringify({ event: 'reply_sent' }));
+            let apiResponse;
+            try { apiResponse = await response.json(); }
+            catch { apiResponse = { note: 'Response body unavailable or not JSON' }; }
+            // Never log request headers or configuration: those contain credentials.
+            record(response.ok ? 'outgoing_message_accepted' : 'outgoing_message_failed', {
+              ...outgoingDetails, httpStatus: response.status,
+              messageId: apiResponse.messages?.[0]?.id ?? null,
+              apiResponse,
+            });
+            } catch (error) {
+              record('outgoing_message_failed', { ...outgoingDetails,
+                error: { name: error?.name, message: error?.message } });
+            }
           }
         }
       }
